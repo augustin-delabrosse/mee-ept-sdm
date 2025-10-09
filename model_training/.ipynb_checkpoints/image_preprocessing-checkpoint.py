@@ -1,0 +1,593 @@
+from osgeo import gdal
+
+import tensorflow as tf
+from tensorflow.keras.utils import Sequence
+
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+import cv2
+import os
+import random
+import warnings
+
+from config import min_max_scaling_dict
+from utils import get_patch_list
+
+warnings.filterwarnings("ignore")
+
+
+def get_labels(df_labels, img_paths, order): 
+    """
+    Retrieves labels from a DataFrame based on specified image paths, order, site, and campaign.
+    
+    Args:
+        df_labels (pd.DataFrame): DataFrame containing columns 'id', 'site', 'campaign', and label columns for each order.
+        img_paths (list): List of image file paths used to extract IDs.
+        order (str): Specifies the insect order for label retrieval (options: 'ephemeroptera', 'plecoptera', 'trichoptera').
+        
+    Returns:
+        list: List of labels corresponding to the specified order.
+
+    Raises:
+        ValueError: If `order` is not among the allowed options.
+    """
+
+    # Validate the parameters
+    valid_orders = ['ephemeroptera', 'plecoptera', 'trichoptera']
+
+    if order not in valid_orders:
+        raise ValueError(f"Invalid order '{order}'. Must be one of {valid_orders}.")
+
+    # Extract IDs from image paths for matching
+    ids_order = [int(os.path.basename(i).split('_')[-1].split('.')[0]) for i in img_paths]
+    sites_order = [str(os.path.basename(i).split('_')[1]) for i in img_paths]
+    campaigns_order = [str(os.path.basename(i).split('_')[0]) for i  in img_paths]
+    
+    # Create a DataFrame to facilitate merging and sorting
+    order_df = pd.DataFrame({
+        'id': ids_order,
+        'site': sites_order,
+        'campaign': campaigns_order
+    })
+    
+    # Merge with the main labels DataFrame to match IDs, sites, and campaigns
+    df_ordered = pd.merge(order_df, df_labels, on=['id', 'site', 'campaign'], how='left')
+    df_ordered.drop_duplicates(inplace=True)
+    
+    # Extract the labels for the specified order
+    labels = df_ordered[order].values.tolist()
+
+    return labels
+
+def patch_minmaxnormalisation(input_image, band_by_band=True):
+    """
+    Applies min-max normalization to an image patch, either band-by-band or globally.
+
+    Args:
+        input_image (np.array): The image array to normalize.
+        band_by_band (bool): If True, normalize each channel separately.
+
+    Returns:
+        np.array: The normalized image.
+    """
+    image = input_image.copy()
+    if band_by_band:
+        if len(image.shape) > 2:
+            for b in range(image.shape[-1]):
+                band = image[:,:,b]
+                max_ = tf.reduce_max(band)
+                min_ = tf.reduce_min(band)
+                if max_ - min_ > 0:
+                    band = (band - min_) / (max_ - min_)  # Normalize 
+                image[:,:,b] = band
+        else:
+            max_ = tf.reduce_max(image)
+            min_ = tf.reduce_min(image)
+            if max_ - min_ > 0:
+                image = (image - min_) / (max_ - min_)
+                image = image.numpy()
+    else:
+        max_ = tf.reduce_max(image)
+        min_ = tf.reduce_min(image)
+        if max_ - min_ > 0:
+            image = (image - min_) / (max_ - min_)
+            image = image.numpy()
+            
+    return image
+
+def minmaxnormalisation_raster_values(image, bands, campaign, site, type_, min_max_scaling_dict, band_by_band=True):
+    """
+    Applies min-max normalization based on raster band statistics from a scaling dictionary.
+
+    Args:
+        image (np.array): Image data to normalize.
+        bands (int): Number of bands in the image.
+        campaign (str): Campaign identifier for the sample.
+        site (str): Site identifier for the sample.
+        type_ (str): Type of raster (e.g., image, dsm, dtm).
+        min_max_scaling_dict (dict): Nested dictionary with min/max per band.
+        band_by_band (bool): If True, normalize each band separately.
+
+    Returns:
+        np.array: The normalized image.
+    """
+    if band_by_band or type_ != "image":
+        if type_ == "image":
+            for b in range(bands):
+                band = image[:,:,b]
+                min_ = min_max_scaling_dict[campaign][site][type_][f'b{b}']['min']
+                max_ = min_max_scaling_dict[campaign][site][type_][f'b{b}']['max']
+                if max_ - min_ > 0:
+                    band = (band - min_) / (max_ - min_)  # Normalize 
+                image[:,:,b] = band
+        else:
+            min_ = min_max_scaling_dict[campaign][site][type_][f'b0']['min']
+            max_ = min_max_scaling_dict[campaign][site][type_][f'b0']['max']
+            if max_ - min_ > 0:
+                image = (image - min_)/(max_ - min_)
+    else:
+        min_ = min_max_scaling_dict[campaign][site][type_][f'all']['min']
+        max_ = min_max_scaling_dict[campaign][site][type_][f'all']['max']
+        if max_ - min_ > 0:
+            image = (image - min_)/(max_ - min_)
+    return image
+
+def random_rotate(image):
+    """
+    Apply a random rotation around the image center.
+
+    Args:
+        image (tf.Tensor): Input image tensor.
+
+    Returns:
+        tf.Tensor: Rotated image.
+    """
+    angle = tf.random.uniform([], minval=-20, maxval=20, dtype=tf.float32)  # Random angle in degrees
+    radians = angle * np.pi / 180.0  # Convert to radians
+
+    # Get image height and width
+    height = tf.cast(tf.shape(image)[0], tf.float32)
+    width = tf.cast(tf.shape(image)[1], tf.float32)
+
+    # Compute center of the image
+    cx, cy = width / 2.0, height / 2.0
+
+    # Compute transformation matrix in 8-element format
+    def get_rotation_matrix(angle, cx, cy):
+        cos_a = tf.math.cos(angle)
+        sin_a = tf.math.sin(angle)
+        # 1x8 transformation matrix (including center translation)
+        return tf.reshape(
+            [cos_a, -sin_a, cx - cos_a * cx + sin_a * cy,
+             sin_a,  cos_a, cy - sin_a * cx - cos_a * cy,
+             0.0,    0.0],  # The missing row [0, 0, 1] is implicit
+            [1, 8]
+        )
+
+    transform_matrix = get_rotation_matrix(radians, cx, cy)
+
+    # Ensure the image is 4D (batch, height, width, channels)
+    image = tf.expand_dims(image, axis=0)  # Add batch dim
+
+    # Apply rotation
+    image_rotated = tf.raw_ops.ImageProjectiveTransformV3(
+        images=image,
+        transforms=transform_matrix,
+        output_shape=tf.shape(image)[1:3],
+        interpolation="NEAREST",
+        fill_value=0.0
+    )
+
+    # Remove batch dimension
+    image_rotated = tf.squeeze(image_rotated, axis=0)
+    
+    return image_rotated
+
+class MultimodalDataGenerator(Sequence):
+    """
+    Data generator for multimodal data (image, DSM, DTM) with options for data augmentation 
+    techniques such as CutMix, Mixup, and classic image augmentations.
+
+    Attributes:
+        img_paths (list): Paths to image files.
+        labels (list): List of labels for classification.
+        batch_size (int): Number of samples per batch.
+        augment (bool): If True, applies classic augmentation techniques.
+        use_mixup (bool): If True, applies Mixup augmentation on images and DEMs.
+        pad (bool): If True, pads the last batch to match the batch size.
+        img_size (int): Target image size for resizing.
+    """
+    def __init__(self, 
+                 img_paths, 
+                 batch_size, 
+                 labels=None, 
+                 whole_image_values_normalization=False, 
+                 band_by_band_normalisation=True, 
+                 reduce_to_5bands=True,
+                 abundance=False, 
+                 augment=False, 
+                 dominant_class="present", 
+                 use_mixup=False,
+                 img_size=128, 
+                 shuffle=True, 
+                 return_labels=True):
+        self.img_paths = img_paths
+        self.labels = labels
+        self.whole_image_values_normalization = whole_image_values_normalization
+        self.band_by_band_normalisation = band_by_band_normalisation
+        self.batch_size = batch_size
+        self.abundance = abundance
+        self.reduce_to_5bands = reduce_to_5bands
+        self.augment = augment
+        self.use_mixup = use_mixup
+        self.dominant_class = dominant_class
+        self.img_size = img_size
+        self.return_labels = return_labels
+        self.indices = np.arange(len(self.img_paths))
+        self.shuffle = shuffle
+        if self.shuffle:
+            np.random.shuffle(self.indices)
+
+    def __len__(self):
+        """
+        Returns the number of batches per epoch.
+        """
+        return int(np.ceil(len(self.img_paths) / self.batch_size))
+
+    def __getitem__(self, index):        
+        """
+        Generates one batch of data.
+
+        Args:
+            index (int): Index of the batch.
+
+        Returns:
+            tuple: Tuple containing batch of images, DEMs, and labels.
+        """
+        # Generate batch indices
+        start_idx = index * self.batch_size
+        end_idx = min((index + 1) * self.batch_size, len(self.img_paths))
+        batch_indices = self.indices[start_idx:end_idx]
+        batch_images, batch_labels = self.__data_generation(batch_indices)
+
+        # Apply mixup augmentation if specified
+        if self.use_mixup:
+            batch_images, batch_labels = self.__apply_mixup(batch_images=batch_images, 
+                                                            batch_labels=batch_labels, 
+                                                            dominant_class=self.dominant_class)
+        if self.augment:
+            batch_images = self.__classic_augment_batch(batch_images)
+
+        if self.return_labels:
+            return np.array(batch_images), np.array(batch_labels)
+        else:
+            return np.array(batch_images)
+            
+
+    def on_epoch_end(self):
+        """
+        Shuffles indices at the end of each epoch only if shuffling is enabled.
+        """
+        if self.shuffle:
+            np.random.shuffle(self.indices)
+
+    def __data_generation(self, batch_indices):
+        """
+        Generates data for the given batch indices.
+
+        Args:
+            batch_indices (list): List of indices for the current batch.
+
+        Returns:
+            tuple: Tuple containing arrays of images and labels for the batch.
+        """
+        batch_images = []
+        batch_labels = []
+        for idx in batch_indices:
+            img = np.concatenate([self.load_and_preprocess_image(variable, channels=1 if len(os.path.basename(variable).split('_')) >= 5 else 10) for variable in self.img_paths[idx]], axis=-1)
+            if self.abundance:
+                label = self.labels[idx]
+            else:
+                label = 1.0 if self.labels[idx] > 0 else 0.0  # Binary classification
+            
+            batch_images.append(img)
+            batch_labels.append(label)
+        return np.array(batch_images), np.array(batch_labels)
+
+    def ensure_string_path(self, path):
+        """
+        Ensures the file path is a string, decoding bytes if necessary.
+
+        Args:
+            path (str or bytes): File path.
+
+        Returns:
+            str: Decoded file path.
+        """
+        if isinstance(path, bytes):
+            return path.decode('utf-8')
+        return path
+
+    def remove_nan(self, image, nan=-32767.0):
+        """
+        Replaces NaN values with a specified value in the image.
+
+        Args:
+            image (np.array): Input image.
+            nan (float): Value to use in place of NaN.
+
+        Returns:
+            np.array: Image with NaNs replaced.
+        """
+        image = np.nan_to_num(image, nan=-32767.0)
+        return image
+
+    def load_and_preprocess_image(self, image_path, channels=10):
+        """
+        Loads and preprocesses an image or DEM file.
+
+        Args:
+            image_path (str): Path to the image file.
+            channels (int): Number of channels for the image.
+
+        Returns:
+            np.array: Preprocessed image or DEM array.
+        """
+        image_path = self.ensure_string_path(image_path)  
+        basename = os.path.basename(image_path)
+        campaign = basename.split('_')[0]
+        site = basename.split('_')[1]
+        type_ = basename.split('_')[2]
+        for i in basename.split('_')[3:-2]:
+            type_ += "_" + i
+        
+        dataset = gdal.Open(str(image_path))
+        if dataset is None:
+            raise FileNotFoundError(f"Failed to open image file: {image_path}")
+
+        bands = dataset.RasterCount
+        image = np.stack([dataset.GetRasterBand(i + 1).ReadAsArray() for i in range(bands)], axis=-1)
+        image = image.astype(np.float32)
+        image = cv2.resize(image, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR)
+        image = self.remove_nan(image)
+        image = image.clip(min=0)
+        if self.whole_image_values_normalization:
+            image = minmaxnormalisation_raster_values(image=image, 
+                                          bands=bands, 
+                                          campaign=campaign, 
+                                          site=site, 
+                                          type_=type_, 
+                                          min_max_scaling_dict=min_max_scaling_dict, 
+                                          band_by_band=self.band_by_band_normalisation)
+        else:
+            image = patch_minmaxnormalisation(image, self.band_by_band_normalisation)
+
+        if self.reduce_to_5bands and (bands == 10):
+            nir = image[:,:,9]
+            redge = image[:,:,7]
+            red = image[:,:,5]
+            green = image[:,:,3]
+            blue = image[:,:,1]
+            image = np.stack([blue, green, red, redge, nir], axis=-1)
+        if channels == 1:
+            image = np.expand_dims(image, axis=-1)
+        return image
+
+    def __classic_augment_batch(self, batch_images):
+        """
+        Apply classic augmentations (flip, rotation) to each image in the batch.
+    
+        Args:
+            batch_images (list of tf.Tensor): List of images in the batch.
+    
+        Returns:
+            list: Augmented images in the same order.
+        """
+        for i in range(len(batch_images)):
+            if random.random() > 0.4:
+                batch_images[i] = tf.image.flip_left_right(batch_images[i])
+            if random.random() > 0.4:
+                batch_images[i] = tf.image.flip_up_down(batch_images[i])
+            if random.random() > 0.4:
+                rot_img = random_rotate(batch_images[i])
+                batch_images[i] = rot_img
+        return batch_images
+
+    def __apply_mixup(self, batch_images, batch_labels, alpha=0.25, beta=0.25, dominant_class="present"):
+        """
+        Apply Mixup augmentation on the batch of images and labels.
+    
+        Args:
+            batch_images (np.array): Array of image data for the batch.
+            batch_labels (np.array): Array of labels for the batch.
+            alpha (float): The alpha parameter for the beta distribution in Mixup.
+            dominant_class (str): Can be either "present" or "absent"
+    
+        Returns:
+            tuple: (mixed_images, mixed_labels)
+        """
+        possible_dominant_classes = ["present", "absent"]
+        if dominant_class not in possible_dominant_classes:
+            raise ValueError("dominant class must be either present or absent")
+            
+        batch_size = batch_images.shape[0]
+        
+        absent_indices = np.where(batch_labels == 0)[0]
+        present_indices = np.where(batch_labels == 1)[0]
+        
+        if dominant_class == "present":
+            target_indices = absent_indices
+            other_indices = present_indices
+        else:
+            target_indices = present_indices
+            other_indices = absent_indices
+
+        if len(target_indices) > 0:
+            mixed_indices = np.random.choice(target_indices, size=batch_size, replace=True)
+        else:
+            mixed_indices = np.random.permutation(batch_size)
+
+        images_shuffled = batch_images[mixed_indices]
+        labels_shuffled = batch_labels[mixed_indices]
+        
+        l = self.sample_beta_distribution(batch_size, alpha, beta)
+        x_l = tf.reshape(l, (batch_size, 1, 1, 1))
+        y_l = tf.reshape(l, (batch_size,))
+        mixed_images = batch_images * x_l + images_shuffled * (1 - x_l)
+        mixed_labels = batch_labels * y_l + labels_shuffled * (1 - y_l)
+        
+        return np.array(mixed_images), np.array(mixed_labels)
+
+    def sample_beta_distribution(self, size, concentration_0=0.2, concentration_1=0.2, min_=0.1, max_=0.9):
+        """
+        Sample values from a beta distribution.
+    
+        Args:
+            size (int): Number of samples to generate.
+            concentration_0 (float): Concentration parameter for beta distribution.
+            concentration_1 (float): Concentration parameter for beta distribution.
+            min_ (float): Minimum value to clip the beta samples.
+            max_ (float): Maximum value to clip the beta samples.
+
+        Returns:
+            tf.Tensor: Array of sampled values.
+        """
+        gamma_1_sample = tf.random.gamma([size], concentration_1)
+        gamma_2_sample = tf.random.gamma([size], concentration_0)
+        beta = gamma_1_sample / (gamma_1_sample + gamma_2_sample)
+        return tf.clip_by_value(beta, min_, max_)
+
+    
+class CombinedDataGenerator(tf.keras.utils.Sequence):
+    """
+    A Keras Sequence generator that combines data from two generators, allowing
+    for optional fusion using CutMix and shuffling of data at the batch level.
+
+    Parameters:
+    - gen1: Generator, the first data generator instance to use.
+    - gen2: Generator, the second data generator instance to use.
+    - shuffle: bool, optional (default=True), whether to shuffle the data after each epoch.
+
+    Methods:
+    - __len__: Returns the number of batches per epoch, based on the smaller generator's length.
+    - __getitem__: Retrieves and optionally shuffles a batch of data from both generators.
+    - on_epoch_end: Shuffles data in each generator at the end of each epoch.
+    """
+    def __init__(self, gen1, gen2, shuffle=True):
+        self.gen1 = gen1
+        self.gen2 = gen2
+        self.shuffle = shuffle
+        self.on_epoch_end()
+
+    def __len__(self):
+        """
+        Returns the number of batches per epoch, which is based on the smaller
+        of the two generators to ensure consistent batch size.
+        """
+        return min(len(self.gen1), len(self.gen2))
+
+    def __getitem__(self, index):
+        """
+        Retrieves a batch of data from each generator, concatenates the results,
+        and shuffles them if specified.
+
+        Args:
+            index (int): The index of the batch to retrieve.
+
+        Returns:
+            tuple: Tuple of concatenated (and optionally shuffled) images and labels.
+        """
+        batch1 = self.gen1[index]
+        batch2 = self.gen2[index]
+        b_1 = np.concatenate([batch1[0], batch2[0]], axis=0)
+        labels = np.concatenate([batch1[1], batch2[1]], axis=0)
+        if self.shuffle:
+            indices = np.arange(b_1.shape[0])
+            np.random.shuffle(indices)
+            b_1 = b_1[indices]
+            labels = labels[indices]
+        return b_1, labels
+
+    def on_epoch_end(self):
+        """
+        Shuffles data at the end of each epoch if each generator has an `on_epoch_end` method.
+        """
+        if hasattr(self.gen1, 'on_epoch_end'):
+            self.gen1.on_epoch_end()
+        if hasattr(self.gen2, 'on_epoch_end'):
+            self.gen2.on_epoch_end()
+
+def get_combined_generator(img_paths, labels, 
+                           batch_size, 
+                           whole_image_values_normalization=False, 
+                           band_by_band_normalisation=True, 
+                           reduce_to_5bands=True, 
+                           abundance=False, 
+                           augment_first_gen=False, 
+                           augment_second_gen=True, 
+                           mixup_first_gen=False, 
+                           mixup_second_gen=False, 
+                           dominant_class="absent", 
+                           img_size=128, 
+                           return_labels=True):
+    """
+    Creates a combined data generator by initializing two multimodal data generators,
+    one with augmentation and one without, and combining them using CombinedDataGenerator.
+
+    Args:
+        img_paths (list): Paths to image files.
+        labels (list): The labels associated with each data sample.
+        batch_size (int): The size of each batch.
+        whole_image_values_normalization (bool): If True, apply normalization using whole raster values.
+        band_by_band_normalisation (bool): If True, normalize each band separately.
+        reduce_to_5bands (bool): If True, reduce image channels to five.
+        abundance (bool): If True, regression task; otherwise, binary classification.
+        augment_first_gen (bool): If True, augment the first generator.
+        augment_second_gen (bool): If True, augment the second generator.
+        mixup_first_gen (bool): If True, apply MixUp in the first generator.
+        mixup_second_gen (bool): If True, apply MixUp in the second generator.
+        dominant_class (str): Dominant class for MixUp.
+        img_size (int): Size to resize images.
+        return_labels (bool): If True, return labels with data.
+
+    Returns:
+        CombinedDataGenerator: Generator that combines the two initialized generators.
+    """
+    train_gen_non_augmented = MultimodalDataGenerator(
+        img_paths=img_paths, 
+        batch_size=batch_size // 2, 
+        labels=labels, 
+        augment=augment_first_gen, 
+        use_mixup=mixup_first_gen,
+        dominant_class=dominant_class,
+        whole_image_values_normalization=whole_image_values_normalization,
+        band_by_band_normalisation=band_by_band_normalisation,
+        reduce_to_5bands=reduce_to_5bands,
+        abundance=abundance,
+        img_size=img_size,
+        return_labels=return_labels
+    )
+
+    augmented_shuffling_indices_A = random.sample(range(len(img_paths)), len(img_paths))
+    image_paths_B = [img_paths[i] for i in augmented_shuffling_indices_A]
+    labels_B = [labels[i] for i in augmented_shuffling_indices_A]
+
+    train_gen_augmented = MultimodalDataGenerator(
+        img_paths=image_paths_B, 
+        batch_size=batch_size // 2, 
+        labels=labels_B, 
+        augment=augment_second_gen, 
+        use_mixup=augment_second_gen,
+        dominant_class=dominant_class,
+        whole_image_values_normalization=whole_image_values_normalization,
+        band_by_band_normalisation=band_by_band_normalisation,
+        reduce_to_5bands=reduce_to_5bands,
+        abundance=abundance,
+        img_size=img_size,
+        return_labels=return_labels
+    )
+
+    train_gen_combined = CombinedDataGenerator(train_gen_augmented, train_gen_non_augmented)
+
+    return train_gen_combined
