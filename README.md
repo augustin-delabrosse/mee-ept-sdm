@@ -1,6 +1,6 @@
 # mee-ept-sdm
 
-Code for the paper: "Lorem Ipsum"
+Code for the paper: "Lorem Ipsum"  
 It enables the data creation, data processing, model training and model inference to develope species distribution modeling (SDM) for aquatic emerging insects (EPT: Ephemeroptera, Plecoptera, Trichoptera).
 
 ## Table of Contents
@@ -68,7 +68,7 @@ cd mee-ept-sdm
 Set up the environment (recommended):
 ```bash
 conda env create -f environment.yml
-conda activate env-name
+conda activate test-env
 ```
 Or install requirements using pip:
 ```bash
