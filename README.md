@@ -1,6 +1,6 @@
 # mee-ept-sdm
 
-Code for the paper: "Lorem Ipsum"  
+Code for the paper: "How to use UAV imagery and AI to model species distribution in a spatially restricted area".  
 It enables the data creation, data processing, model training and model inference to develope species distribution modeling (SDM) for aquatic emerging insects (EPT: Ephemeroptera, Plecoptera, Trichoptera).
 
 ## Table of Contents
