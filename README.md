@@ -99,9 +99,9 @@ Set up the environment (recommended):
 conda env create -f environment.yml
 conda activate test-env
 ```
-Or install requirements using pip:
+Then install requirements using pip:
 ```bash
-pip install -r requirements.txt --no-deps
+pip install -r requirements.txt
 ```
 
 ## Usage

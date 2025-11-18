@@ -2,7 +2,7 @@ codecarbon==2.7.4
 GDAL==3.6.2
 geopandas==0.13.2
 matplotlib==3.7.5
-numpy==1.24.3
+numpy
 opencv_contrib_python==4.8.1.78
 osmnx==1.9.1
 pandas==2.0.3
@@ -11,7 +11,7 @@ rasterio==1.3.11
 rasterstats==0.20.0
 scikit_learn==1.3.2
 scipy==1.7.1
-shap==0.44.1
+shap
 Shapely==2.0.7
 tensorflow==2.13.0
 tensorflow_intel==2.13.0
