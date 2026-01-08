@@ -1,6 +1,6 @@
 # mee-ept-sdm
 
-Code for the paper: "Predicting fine-scale spatial distribution of aquatic emerging insects in contrasted agricultural landscapes using drone imageries and artificial intelligence".  
+Code for the paper: "Fine-scale species distribution modelling with drone imagery and artificial intelligence: a comparative study on emerging aquatic insects".  
 It enables the data creation, data processing, model training and model inference to develope species distribution modeling (SDM) for aquatic emerging insects (EPT: Ephemeroptera, Plecoptera, Trichoptera).
 
 ## Table of Contents
