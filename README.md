@@ -88,21 +88,36 @@ The outputs of the three branches are concatenated and passed to the classificat
 
 ## Getting Started
 
+### Prerequisites
+- [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or [Anaconda](https://www.anaconda.com/products/distribution)
+
+### Installation
+
 Clone the repository:
 ```bash
-git clone https://github.com/augustin-delabrosse/mee-ept-sdm.git
+git clone https://github.com/augustin-delabrosse/mee-ept-sdm. git
 cd mee-ept-sdm
 ```
 
-Set up the environment (recommended):
+Set up the environment:
 ```bash
-conda env create -f environment.yml
+# Create a new conda environment with Python 3.8
+conda create -n "test-env" python=3.8
+
+# Activate the environment
 conda activate test-env
-```
-Then install requirements using pip:
-```bash
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Install rastereasy without dependencies to avoid conflicts
+pip install --no-deps rastereasy
+
+# Install specific version of POT and remaining dependencies
+pip install POT==0.9.5
+pip install rasterio geopandas scikit-learn matplotlib ipywidgets ipympl
 ```
+
 
 ## Usage
 
