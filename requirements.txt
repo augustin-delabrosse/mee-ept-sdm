@@ -7,6 +7,7 @@ opencv_contrib_python==4.8.1.78
 osmnx==1.9.1
 pandas==2.0.3
 pyproj==3.5.0
+rastereast==0.2.0
 rasterio==1.3.11
 rasterstats==0.20.0
 scikit_learn==1.3.2
