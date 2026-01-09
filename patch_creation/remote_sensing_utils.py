@@ -8,6 +8,7 @@ import rasterio
 from rasterio.features import geometry_mask
 from rasterio.warp import reproject, Resampling, calculate_default_transform
 from shapely.geometry import box
+import os
 
 def resample_dem_to_match(src_path, 
                           dest_transform, dest_crs,
